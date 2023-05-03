@@ -1,0 +1,3 @@
+#!/bin/bash
+
+sbupdate -r -k <<< $1
