@@ -37,7 +37,7 @@ function load_config() {
   SPLASH="/usr/share/systemd/bootctl/splash-arch.bmp"
   BACKUP=1
   EXTRA_SIGN=()
-  declare -g -A CONFIGS CMDLINE INITRD OUTPUT
+  declare -g -A CONFIGS CMDLINE INITRD OUTPUT CONFIG XEN_OUTPUT
 
   shopt -s nullglob
   INITRD_PREPEND=(/boot/@(intel|amd)-ucode.img)
@@ -54,8 +54,8 @@ function load_config() {
   local key=("${KEY_DIR}"/@(DB|db).key); readonly KEY="${key[0]}"
   local cert=("${KEY_DIR}"/@(DB|db).crt); readonly CERT="${cert[0]}"
 
-  readonly KEY_DIR ESP_DIR OUT_DIR SPLASH BACKUP EXTRA_SIGN INITRD_PREPEND CMDLINE_DEFAULT
-  readonly -A CONFIGS CMDLINE INITRD OUTPUT
+  readonly KEY_DIR ESP_DIR OUT_DIR SPLASH BACKUP EXTRA_SIGN INITRD_PREPEND CMDLINE_DEFAULT CONFIG_DEFAULT
+  readonly -A CONFIGS CMDLINE INITRD OUTPUT CONFIG XEN_OUTPUT
 }
 
 # Parse script arguments
@@ -91,6 +91,7 @@ function find_efi_stub() {
       error "unsupported architecture: ${uname}"
       ;;
   esac
+  readonly XENSTUB="/boot/xen.efi"
 }
 
 # Create a list of kernels to process
@@ -131,15 +132,24 @@ function output_name() {
   echo "${ESP_DIR}/${OUTPUT[$1]:-${OUT_DIR}/$1-signed.efi}"
 }
 
+# Return output file path corresponding to an image
+#   $1: configuration name
+function xen_output_name() {
+  echo "${ESP_DIR}/${XEN_OUTPUT[$1]:-${OUT_DIR}/xen-$1-signed.efi}"
+}
+
 # Remove a signed kernel image
 #   $1: configuration name
 function remove_image() {
   local output; output="$(output_name "$1")"
+  local xen_output; xen_output="$(xen_output_name "$1")"
   echo "Removing $(basename "${output}")"
   if (( BACKUP )); then
     mv -f "${output}" "${output}.bak"
+    mv -f "${xen_output}" "${xen_output}.bak"
   else
     rm "${output}"
+    rm "${xen_output}"
   fi
 }
 
@@ -180,6 +190,63 @@ function update_image() {
   sign_file --output "${output}" "${output}"
 }
 
+# Generate a signed xen+kernel image
+#   $1: configuration name
+#   $2: kernel name
+function update_xen_image() {
+  local config="${CONFIG[$1]:-${CONFIG_DEFAULT}}"
+  local kernel="/boot/vmlinuz-$2"
+  local ramdisk="${INITRD[$1]:-/boot/initramfs-$1.img}"
+  local ucode;
+  local output; output="$(xen_output_name "$1")"
+
+  if [ -f "/boot/xen-efi-intel-ucode.bin" ]; then
+    ucode="/boot/xen-efi-intel-ucode.bin"
+  elif [ -f "/boot/xen-efi-amd-ucode.bin" ]; then
+    ucode="/boot/xen-efi-amd-ucode.bin"
+  else
+    echo "Missing microcode... Not extracted? (Reinstall microcode)"
+  fi
+
+  # Get the end address of the padding section as hexadecimal in UPPERCASE for bc
+  local base="$(objdump -h ${XENSTUB} | perl -ane '/\.pad/ && printf "%016x\n", hex($F[2]) + hex($F[3])' | tr "a-z" "A-Z")"
+  # Section offset for the added files, padded to power of 2 boundaries
+  local offset=0
+
+  # Round up to next power of 2
+  local snippet='my $v = hex($ARGV[0]); $v -= 1; $v |= $v >> 1; $v |= $v >> 2; $v |= $v >> 4; $v |= $v >> 8; $v |= $v >> 16; $v += 1; print sprintf("%X", $v);'
+
+  local cmdline=()
+
+  for name in config ucode kernel ramdisk;
+  do
+    if [ -z "${!name}" ]; then
+      continue
+    fi
+
+    # Calculate the address of the section
+    local vma=$(echo "obase=16;ibase=16;$base + $offset" | bc)
+    # Create the variable holding the commandline snippet
+    cmdline+=("--add-section" ".$name=${!name}" "--change-section-vma" ".$name=0x$vma")
+    # Convert file size to hex
+    local size=$(echo "obase=16;$(wc -c ${!name} | cut -d ' ' -f 1)" | bc)
+    # Add the file size to the offset
+    offset=$(echo "obase=16;ibase=16;$offset + $size" | bc)
+    # Pad the offset to the next power of 2
+    offset=$(perl -e "$snippet" "0x$offset")
+  done
+
+  echo "Generating and signing (XEN) $(basename "${output}")"
+
+  # Create a combined binary with the XEN hypervisor EFI. For additional information see:
+  # https://xenbits.xen.org/docs/unstable/misc/efi.html
+  objcopy "${cmdline[@]}" "${XENSTUB}" "${output}"
+  wait $!
+
+  # Sign the resulting output file
+  sign_file --output "${output}" "${output}"
+}
+
 # Map kernel versions to image names and process changes
 function process_kernels() {
   for name in "${KERNELS[@]}"; do
@@ -188,6 +255,7 @@ function process_kernels() {
         remove_image "${cfg}"
       else
         update_image "${cfg}" "${name}"
+        update_xen_image "${cfg}" "${name}"
       fi
     done
   done
