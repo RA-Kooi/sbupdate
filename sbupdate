@@ -197,7 +197,7 @@ function update_xen_image() {
   local config="${CONFIG[$1]:-${CONFIG_DEFAULT}}"
   local kernel="/boot/vmlinuz-$2"
   local ramdisk="${INITRD[$1]:-/boot/initramfs-$1.img}"
-  local ucode;
+  local ucode="";
   local output; output="$(xen_output_name "$1")"
 
   if [ -f "/boot/xen-efi-intel-ucode.bin" ]; then
