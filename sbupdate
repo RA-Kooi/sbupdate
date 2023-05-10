@@ -209,12 +209,12 @@ function update_xen_image() {
   fi
 
   # Get the end address of the padding section as hexadecimal in UPPERCASE for bc
-  local base="$(objdump -h ${XENSTUB} | perl -ane '/\.pad/ && printf "%016x\n", hex($F[2]) + hex($F[3])' | tr "a-z" "A-Z")"
-  # Section offset for the added files, padded to power of 2 boundaries
-  local offset=0
+  local base="$(objdump -h ${XENSTUB} | perl -ane '/ \./ && printf "%016x\n", hex($F[2]) + hex($F[3])' | tr "a-z" "A-Z" | tail -n -1)"
+  # Align base address to a 24 bit boundary
+  base=$(echo "obase=16;ibase=16;v = $base % 1000000; if(v == 0) $base else $base + (1000000 - v);" | bc)
 
-  # Round up to next power of 2
-  local snippet='my $v = hex($ARGV[0]); $v -= 1; $v |= $v >> 1; $v |= $v >> 2; $v |= $v >> 4; $v |= $v >> 8; $v |= $v >> 16; $v += 1; print sprintf("%X", $v);'
+  # Section offset for the added files, padded to power of 4K boundaries
+  local offset=0
 
   local cmdline=()
 
@@ -230,10 +230,8 @@ function update_xen_image() {
     cmdline+=("--add-section" ".$name=${!name}" "--change-section-vma" ".$name=0x$vma")
     # Convert file size to hex
     local size=$(echo "obase=16;$(wc -c ${!name} | cut -d ' ' -f 1)" | bc)
-    # Add the file size to the offset
-    offset=$(echo "obase=16;ibase=16;$offset + $size" | bc)
-    # Pad the offset to the next power of 2
-    offset=$(perl -e "$snippet" "0x$offset")
+    # Add the file size to the offset and align to 4K
+    offset=$(echo "obase=16;ibase=16;o = $offset + $size; v = o % 1000; if(v == 0) o else o + (1000 - v);" | bc)
   done
 
   echo "Generating and signing (XEN) $(basename "${output}")"
