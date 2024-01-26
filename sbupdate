@@ -34,28 +34,22 @@ function load_config() {
   KEY_DIR="/etc/efi-keys"
   ESP_DIR="/boot"
   OUT_DIR="EFI/Arch"
-  SPLASH="/usr/share/systemd/bootctl/splash-arch.bmp"
   BACKUP=1
   EXTRA_SIGN=()
-  declare -g -A CONFIGS CMDLINE INITRD OUTPUT CONFIG XEN_OUTPUT
-
-  shopt -s nullglob
-  INITRD_PREPEND=(/boot/@(intel|amd)-ucode.img)
-  shopt -u nullglob
-
-  [[ -f /etc/kernel/cmdline ]] && CMDLINE_DEFAULT="$(</etc/kernel/cmdline)"
+  declare -g -A CONFIGS INITRD CONFIG XEN_OUTPUT
 
   # shellcheck disable=SC1090
   source "${CONFFILE}"
 
   [[ -d "${ESP_DIR}" ]] || error "${ESP_DIR} does not exist"
-  [[ -n "${CMDLINE_DEFAULT:+x}" ]] || error "CMDLINE_DEFAULT is not defined or empty"
+  [[ -n "${CONFIG_DEFAULT:+x}" ]] || error "CONFIG_DEFAULT is not defined or empty"
+  [[ -f "${CONFIG_DEFAULT}" ]] || error "${CONFIG_DEFAULT} does not exist"
 
   local key=("${KEY_DIR}"/@(DB|db).key); readonly KEY="${key[0]}"
   local cert=("${KEY_DIR}"/@(DB|db).crt); readonly CERT="${cert[0]}"
 
-  readonly KEY_DIR ESP_DIR OUT_DIR SPLASH BACKUP EXTRA_SIGN INITRD_PREPEND CMDLINE_DEFAULT CONFIG_DEFAULT
-  readonly -A CONFIGS CMDLINE INITRD OUTPUT CONFIG XEN_OUTPUT
+  readonly KEY_DIR ESP_DIR OUT_DIR BACKUP EXTRA_SIGN CONFIG_DEFAULT
+  readonly -A CONFIGS INITRD CONFIG XEN_OUTPUT
 }
 
 # Parse script arguments
@@ -79,18 +73,6 @@ function parse_args() {
 
 # Find the location of the systemd EFI stub
 function find_efi_stub() {
-  local uname; uname="$(uname -m)"
-  case "${uname}" in
-    x86_64)
-      readonly EFISTUB="/usr/lib/systemd/boot/efi/linuxx64.efi.stub"
-      ;;
-    i686)
-      readonly EFISTUB="/usr/lib/systemd/boot/efi/linuxia32.efi.stub"
-      ;;
-    *)
-      error "unsupported architecture: ${uname}"
-      ;;
-  esac
   readonly XENSTUB="/boot/xen.efi"
 }
 
@@ -128,12 +110,6 @@ function get_kernels() {
 
 # Return output file path corresponding to an image
 #   $1: configuration name
-function output_name() {
-  echo "${ESP_DIR}/${OUTPUT[$1]:-${OUT_DIR}/$1-signed.efi}"
-}
-
-# Return output file path corresponding to an image
-#   $1: configuration name
 function xen_output_name() {
   echo "${ESP_DIR}/${XEN_OUTPUT[$1]:-${OUT_DIR}/xen-$1-signed.efi}"
 }
@@ -141,14 +117,11 @@ function xen_output_name() {
 # Remove a signed kernel image
 #   $1: configuration name
 function remove_image() {
-  local output; output="$(output_name "$1")"
   local xen_output; xen_output="$(xen_output_name "$1")"
   echo "Removing $(basename "${output}")"
   if (( BACKUP )); then
-    mv -f "${output}" "${output}.bak"
     mv -f "${xen_output}" "${xen_output}.bak"
   else
-    rm "${output}"
     rm "${xen_output}"
   fi
 }
@@ -157,37 +130,6 @@ function remove_image() {
 #   $*: arguments to sbsign
 function sign_file() {
   sbsign --key "${KEY}" --cert "${CERT}" "$@"
-}
-
-# Generate a signed kernel image
-#   $1: configuration name
-#   $2: kernel name
-function update_image() {
-  local linux="/boot/vmlinuz-$2"
-  local initrd="${INITRD[$1]:-/boot/initramfs-$1.img}"
-  local cmdline="${CMDLINE[$1]:-${CMDLINE_DEFAULT}}"
-  local output; output="$(output_name "$1")"
-
-  echo "Generating and signing $(basename "${output}")"
-
-  # Create a combined binary with systemd EFI stub. For additional information see:
-  #   https://github.com/systemd/systemd/blob/master/src/boot/efi/stub.c
-  #   https://github.com/systemd/systemd/blob/master/test/test-efi-create-disk.sh
-  #
-  # Prepend initramfs files are joined with the main initramfs in one image. Refer to:
-  #   https://www.kernel.org/doc/Documentation/early-userspace/buffer-format.txt
-  #   https://www.kernel.org/doc/Documentation/x86/microcode.txt
-  objcopy \
-    --add-section .osrel="/etc/os-release"                          --change-section-vma .osrel=0x20000    \
-    --add-section .cmdline=<(printf "%s\0" "${cmdline}")            --change-section-vma .cmdline=0x30000  \
-    --add-section .splash="${SPLASH}"                               --change-section-vma .splash=0x40000   \
-    --add-section .linux="${linux}"                                 --change-section-vma .linux=0x2000000  \
-    --add-section .initrd=<(cat "${INITRD_PREPEND[@]}" "${initrd}") --change-section-vma .initrd=0x3000000 \
-    "${EFISTUB}" "${output}"
-  wait $!
-
-  # Sign the resulting output file
-  sign_file --output "${output}" "${output}"
 }
 
 # Generate a signed xen+kernel image
@@ -252,7 +194,6 @@ function process_kernels() {
       if (( REMOVE )); then
         remove_image "${cfg}"
       else
-        update_image "${cfg}" "${name}"
         update_xen_image "${cfg}" "${name}"
       fi
     done
