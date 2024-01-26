@@ -181,7 +181,6 @@ function update_xen_image() {
   # Create a combined binary with the XEN hypervisor EFI. For additional information see:
   # https://xenbits.xen.org/docs/unstable/misc/efi.html
   objcopy "${cmdline[@]}" "${XENSTUB}" "${output}"
-  wait $!
 
   # Sign the resulting output file
   sign_file --output "${output}" "${output}"
